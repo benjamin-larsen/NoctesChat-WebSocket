@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -37,7 +38,61 @@ func (s *Socket) Close(closeCode int, text string) {
 	s.conn.Close()
 }
 
+func (s *Socket) RaiseException(err error) {
+	s.Close(1011, "Internal Server Error")
+
+	log.Printf("An error occured in WebSocket: %s\n", err)
+}
+
+var ErrInvalidJson = errors.New("Invalid JSON")
+var ErrInvalidMessageType = errors.New("Unknown message type")
+
+func (s *Socket) RunAuth() error {
+	for s.hasAuth != true {
+		_, rawMsg, err := s.conn.ReadMessage()
+
+		if err != nil {
+			return err
+		}
+
+		var baseMsg models.BaseInbound
+		err = json.Unmarshal(rawMsg, &baseMsg)
+
+		if err != nil {
+			s.Close(1008, "Invalid JSON")
+			return ErrInvalidJson
+		}
+
+		if baseMsg.MsgType != "login" {
+			s.Close(1008, "Unknown message type: "+baseMsg.MsgType)
+			return ErrInvalidMessageType
+		}
+
+		var msg models.LoginInbound
+		err = json.Unmarshal(baseMsg.Data, &msg)
+
+		if err != nil {
+			s.Close(1008, "Invalid JSON")
+			return err
+		}
+
+		err = s.ProcessLogin(msg)
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *Socket) Run() {
+	err := s.RunAuth();
+
+	if err != nil || s.hasAuth != true {
+		return
+	}
+
 	for {
 		_, rawMsg, err := s.conn.ReadMessage()
 
@@ -54,21 +109,9 @@ func (s *Socket) Run() {
 		}
 
 		switch baseMsg.MsgType {
-		case "login":
-			{
-				var msg models.LoginInbound
-				err = json.Unmarshal(baseMsg.Data, &msg)
-
-				if err != nil {
-					s.Close(1008, "Invalid JSON")
-					return
-				}
-
-				s.ProcessLogin(msg)
-			}
 		default:
 			{
-				s.Close(1008, "Unknown message type: " + baseMsg.MsgType)
+				s.Close(1008, "Unknown message type: "+baseMsg.MsgType)
 				return
 			}
 		}
