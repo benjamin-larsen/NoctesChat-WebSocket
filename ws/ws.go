@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"sync"
 
 	"github.com/benjamin-larsen/NoctesChat-WebSocket/models"
 	"github.com/gorilla/websocket"
@@ -22,10 +23,32 @@ var upgrader = websocket.Upgrader{
 }
 
 type Socket struct {
-	conn      *websocket.Conn
-	userId    uint64
-	userToken models.UserToken
-	hasAuth   bool
+	conn         *websocket.Conn
+	userId       uint64
+	userToken    models.UserToken
+	hasAuth      bool
+	isClosing    bool
+	closingMutex sync.RWMutex
+}
+
+// WARNING: unlocking is expected to be handled by the calling function
+// Returns wether the socket is closing, and wether the lock should be released
+func (s *Socket) IsClosing() (isClosing bool, shouldUnlock bool) {
+	lockSuccess := s.closingMutex.TryRLock()
+
+	// if lock failed that means the Writer from Cleanup is running, which means that the Socket is indeed closing.
+	if lockSuccess == false {
+		return true, false
+	}
+
+	return s.isClosing, true
+}
+
+// This is a helper method for IsClosing() simply insert the second boolean from IsClosing() here in a defer
+func (s *Socket) ReleaseCleanupLock(should bool) {
+	if should {
+		s.closingMutex.RUnlock()
+	}
 }
 
 func (s *Socket) Close(closeCode int, text string) {
@@ -119,7 +142,15 @@ func (s *Socket) Run() {
 }
 
 func (s *Socket) Cleanup() {
+	s.closingMutex.Lock()
+	defer s.closingMutex.Unlock()
 
+	// Already doing cleanup
+	if s.isClosing {
+		return
+	}
+
+	s.isClosing = true
 }
 
 func handleUpgrade(w http.ResponseWriter, r *http.Request) {
